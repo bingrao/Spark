@@ -142,7 +142,7 @@ private[spark] object BlockManagerMessages {
 
 
   ////////////////////////////////////////////////////////////////////
-  ////////////////////////////////////////////////////////////////////
+
 
   // Broadcast JobDAG to slaves. yyh
   case class BroadcastJobDAG(jobId: Int, jobDAG: Option[mutable.HashMap[Int, Int]])
@@ -180,5 +180,5 @@ private[spark] object BlockManagerMessages {
   // case class ReportRefMap(blockManagerId: BlockManagerId, refMap: mutable.Map[BlockId, Int])
   // extends ToBlockManagerMaster
 
-
+  ////////////////////////////////////////////////////////////////////
 }

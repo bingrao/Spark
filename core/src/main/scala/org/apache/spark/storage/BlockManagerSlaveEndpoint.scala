@@ -80,8 +80,6 @@ class BlockManagerSlaveEndpoint(
 
 
     ////////////////////////////////////////////////////////////////////////
-    ////////////////////////////////////////////////////////////////////////
-
     case BroadcastJobDAG(jobId, jobDAG) => // yyh
       // In the future, profile the JobDAG
       val (currentRefMap, refMap) = blockManager.updateRefProfile(jobId, jobDAG)
@@ -97,7 +95,7 @@ class BlockManagerSlaveEndpoint(
     // case BroadcastRefCount(refCount) =>
     // TODO: processing refcount
     // context.reply(true)
-
+    ////////////////////////////////////////////////////////////////////////
   }
 
   private def doAsync[T](actionMessage: String, context: RpcCallContext)(body: => T): Unit = {

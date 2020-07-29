@@ -21,10 +21,12 @@ import java.io.{File, FileWriter, OutputStream}
 import java.nio.ByteBuffer
 import java.util.LinkedHashMap
 
+import scala.collection.immutable.ListMap
 import scala.collection.mutable
 // Bing: add MutableList
 import scala.collection.mutable.{ArrayBuffer, MutableList}
 import scala.reflect.ClassTag
+import scala.util.control.Breaks.{break, breakable}
 
 import com.google.common.io.ByteStreams
 
@@ -97,9 +99,11 @@ private[spark] class MemoryStore(
    * Bing: define two variables to identify and statistic reference count
    */
   var refMap = mutable.HashMap[BlockId, Int]()  // yyh no recency. remaining refCount of
+
   // all blocks in cache and disk
   var currentRefMap = mutable.HashMap[BlockId, Int]() // remaining refCount of blocks in cache
   val stickyLog = new FileWriter(new File("stickyLog.txt"))
+
   private val blockManager = blockEvictionHandler.asInstanceOf[BlockManager]
 
 
@@ -486,26 +490,49 @@ private[spark] class MemoryStore(
       def blockIsEvictable(blockId: BlockId, entry: MemoryEntry[_]): Boolean = {
         entry.memoryMode == memoryMode && (rddToAdd.isEmpty || rddToAdd != getRddId(blockId))
       }
+
+      logInfo(s"yyh: LRC-online: Try to evict space for $blockId")
+      // be cautious to print all the entries, for concurrency issues
+      // This is synchronized to ensure that the set of entries is not changed
+      // (because of getValue or getBytes) while traversing the iterator, as that
+      // can lead to exceptions.
+      var blockToCacheRefCount = Int.MaxValue
+      // yyh: if this is a broadcast block, cache it anyway
+      refMap.synchronized {
+        if (blockId.isDefined && blockId.get.isRDD) {
+          if (refMap.contains(blockId.get)) {
+            blockToCacheRefCount = refMap(blockId.get)
+            logInfo(s"LRC: The ref count of $blockId is $blockToCacheRefCount")
+          } else {
+            blockToCacheRefCount = 1
+            logError(s"LRC: The ref count of $blockId is not in the refMap")
+          }
+        }
+      }
+
       // This is synchronized to ensure that the set of entries is not changed
       // (because of getValue or getBytes) while traversing the iterator, as that
       // can lead to exceptions.
       entries.synchronized {
-        val iterator = entries.entrySet().iterator()
-        while (freedMemory < space && iterator.hasNext) {
-          val pair = iterator.next()
-          val blockId = pair.getKey
-          val entry = pair.getValue
-          if (blockIsEvictable(blockId, entry)) {
-            // We don't want to evict blocks which are currently being read, so we need to obtain
-            // an exclusive write lock on blocks which are candidates for eviction. We perform a
-            // non-blocking "tryLock" here in order to ignore blocks which are locked for reading:
-            if (blockInfoManager.lockForWriting(blockId, blocking = false).isDefined) {
-              if (blockId.isRDD) {
-                // Bing: For fair comparison, only block rdd will be
-                // considered for eviction as in LRC policies
-                selectedBlocks += blockId
-                freedMemory += pair.getValue.size
-              }
+        currentRefMap.synchronized {
+          val iterator = entries.entrySet().iterator()
+          val listMap = ListMap(currentRefMap.toSeq.sortBy(_._2): _*)
+
+          breakable {
+            for ((blockId, refCount) <- listMap) {
+              if (refCount < blockToCacheRefCount && freedMemory < space) {
+                val entry = entries.get(blockId)
+                if (blockIsEvictable(blockId, entry)) {
+                  // We don't want to evict blocks which are currently being read,
+                  // so we need to obtain an exclusive write lock on blocks which are
+                  // candidates for eviction. We perform a non-blocking "tryLock" here
+                  // in order to ignore blocks which are locked for reading:
+                  if (blockInfoManager.lockForWriting(blockId, blocking = false).isDefined) {
+                    selectedBlocks += blockId
+                    freedMemory += entry.size
+                  }
+                }
+              } else break
             }
           }
         }

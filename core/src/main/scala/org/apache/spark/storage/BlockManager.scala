@@ -23,7 +23,6 @@ import java.nio.ByteBuffer
 import java.nio.channels.Channels
 import java.util.Collections
 import java.util.concurrent.{CompletableFuture, ConcurrentHashMap, TimeUnit}
-import scala.io.Source // yyh
 
 import scala.collection.immutable.List
 import scala.collection.mutable
@@ -57,11 +56,12 @@ import org.apache.spark.rpc.RpcEnv
 import org.apache.spark.scheduler.ExecutorCacheTaskLocation
 import org.apache.spark.serializer.{SerializerInstance, SerializerManager}
 import org.apache.spark.shuffle.{ShuffleManager, ShuffleWriteMetricsReporter}
+import org.apache.spark.storage.BlockManagerMessages.{BlockWithPeerEvicted}
 import org.apache.spark.storage.memory._
 import org.apache.spark.unsafe.Platform
 import org.apache.spark.util._
 import org.apache.spark.util.io.ChunkedByteBuffer
-import org.apache.spark.storage.BlockManagerMessages.{BlockWithPeerEvicted}
+
 
 
 
@@ -862,6 +862,7 @@ private[spark] class BlockManager(
               blockId, memoryStore.getBytes(blockId).get.toInputStream())(info.classTag)
           }
 
+          ////////////////////////////////////////////////////////////////////////////
           if (blockId.isRDD) {
             logInfo(s"LRC: Cache Hit: $blockId, will deduct its referenced count by 1")
             this.synchronized {
@@ -869,6 +870,8 @@ private[spark] class BlockManager(
             }
             memoryStore.deductRefCountByBlockIdHit(blockId)
           }
+          ////////////////////////////////////////////////////////////////////////////
+
 
           // We need to capture the current taskId in case the iterator completion is triggered
           // from a different thread which does not have TaskContext set; see SPARK-18406 for
@@ -893,6 +896,7 @@ private[spark] class BlockManager(
             }
           }
 
+          ////////////////////////////////////////////////////////////////////////////
           if (blockId.isRDD) {
             val rddId = blockId.asRDDId.toString.split("_")(1).toInt
             if(refProfile_online.contains(rddId)) {
@@ -904,6 +908,7 @@ private[spark] class BlockManager(
               memoryStore.deductRefCountByBlockIdMiss(blockId)
             }
           }
+          ////////////////////////////////////////////////////////////////////////////
 
           val ci = CompletionIterator[Any, Iterator[Any]](iterToReturn, {
             releaseLockAndDispose(blockId, diskData, taskContext)
@@ -938,12 +943,30 @@ private[spark] class BlockManager(
     if (level.deserialized) {
       // Try to avoid expensive serialization by reading a pre-serialized copy from disk:
       if (level.useDisk && diskStore.contains(blockId)) {
+
+        ////////////////////////////////////////////////////////////////////////////
+        if (blockId.isRDD) {
+          val rddId = blockId.asRDDId.toString.split("_")(1).toInt
+          if(refProfile_online.contains(rddId)) {
+            logInfo(s"LRC: RDD block Cache Miss: $blockId, " +
+              s"will deduct its referenced count by 1")
+            this.synchronized {
+              missCount += 1
+            }
+            memoryStore.deductRefCountByBlockIdMiss(blockId)
+          }
+        }
+        ////////////////////////////////////////////////////////////////////////////
+
         // Note: we purposely do not try to put the block back into memory here. Since this branch
         // handles deserialized blocks, this block may only be cached in memory as objects, not
         // serialized bytes. Because the caller only requested bytes, it doesn't make sense to
         // cache the block's deserialized objects since that caching may not have a payoff.
         diskStore.getBytes(blockId)
       } else if (level.useMemory && memoryStore.contains(blockId)) {
+
+
+
         // The block was not found on disk, so serialize an in-memory copy:
         new ByteBufferBlockData(serializerManager.dataSerializeWithExplicitClassTag(
           blockId, memoryStore.getValues(blockId).get, info.classTag), true)
@@ -952,8 +975,30 @@ private[spark] class BlockManager(
       }
     } else {  // storage level is serialized
       if (level.useMemory && memoryStore.contains(blockId)) {
+        ////////////////////////////////////////////////////////////////////////////
+        if (blockId.isRDD) {
+          logInfo(s"LRC: Cache Hit: $blockId, will deduct its referenced count by 1")
+          this.synchronized {
+            hitCount += 1
+          }
+          memoryStore.deductRefCountByBlockIdHit(blockId)
+        }
+        ////////////////////////////////////////////////////////////////////////////
         new ByteBufferBlockData(memoryStore.getBytes(blockId).get, false)
       } else if (level.useDisk && diskStore.contains(blockId)) {
+        ////////////////////////////////////////////////////////////////////////////
+        if (blockId.isRDD) {
+          val rddId = blockId.asRDDId.toString.split("_")(1).toInt
+          if(refProfile_online.contains(rddId)) {
+            logInfo(s"LRC: RDD block Cache Miss: $blockId, " +
+              s"will deduct its referenced count by 1")
+            this.synchronized {
+              missCount += 1
+            }
+            memoryStore.deductRefCountByBlockIdMiss(blockId)
+          }
+        }
+        ////////////////////////////////////////////////////////////////////////////
         val diskData = diskStore.getBytes(blockId)
         maybeCacheDiskBytesInMemory(info, blockId, level, diskData)
           .map(new ByteBufferBlockData(_, false))

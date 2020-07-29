@@ -23,11 +23,10 @@ import java.nio.channels.{Channels, ReadableByteChannel, WritableByteChannel}
 import java.nio.channels.FileChannel.MapMode
 import java.util.concurrent.{ConcurrentHashMap, TimeUnit}
 
-import scala.collection.mutable.ListBuffer
-
 import com.google.common.io.Closeables
 import io.netty.channel.DefaultFileRegion
 import org.apache.commons.io.FileUtils
+import scala.collection.mutable.ListBuffer
 
 import org.apache.spark.{SecurityManager, SparkConf}
 import org.apache.spark.internal.{config, Logging}
@@ -37,6 +36,7 @@ import org.apache.spark.security.CryptoStreamUtils
 import org.apache.spark.unsafe.array.ByteArrayMethods
 import org.apache.spark.util.Utils
 import org.apache.spark.util.io.ChunkedByteBuffer
+
 
 /**
  * Stores BlockManager blocks on disk.

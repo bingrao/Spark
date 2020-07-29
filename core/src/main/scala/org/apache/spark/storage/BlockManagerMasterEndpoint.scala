@@ -27,9 +27,10 @@ import scala.collection.immutable.List
 import scala.collection.mutable
 import scala.concurrent.{ExecutionContext, Future}
 import scala.io.Source // yyh
-import scala.util.Random
+
 
 import com.google.common.cache.CacheBuilder
+import scala.util.Random
 
 import org.apache.spark.{SparkConf, SparkException}
 import org.apache.spark.annotation.DeveloperApi
@@ -101,7 +102,6 @@ class BlockManagerMasterEndpoint(
 
 
   ////////////////////////////////////////////////////////////////////////////////////////////////
-
   private val startTime = System.currentTimeMillis
   logInfo(s"LRC: Log start time: $startTime")
   var RDDHit = 0
@@ -118,7 +118,7 @@ class BlockManagerMasterEndpoint(
   private val appName = conf.getAppName.filter(!" ".contains(_))
   val path = System.getProperty("user.dir")
   val appDAG = path + "/" + appName + ".txt"
-  logInfo(s"yyh: Driver Endpoint tries to read profile: path: $appDAG")
+  logInfo(s"LRC: Driver Endpoint tries to read profile: path: $appDAG")
   if (Files.exists(Paths.get(appDAG))) {
     for (line <- Source.fromFile(appDAG).getLines()) {
       val z = line.split(":")
@@ -156,7 +156,7 @@ class BlockManagerMasterEndpoint(
   // In the case where a block whose peer is already evicted, the BlockManger should not report.
 
   val peers = path + "/" + appName + "-Peers.txt"
-  logInfo(s"yyh: Driver Endpoint tries to read peers profile: path :$peers")
+  logInfo(s"LRC: Driver Endpoint tries to read peers profile: path :$peers")
   if (Files.exists(Paths.get(peers))) {
     for (line <- Source.fromFile(peers).getLines()) {
       val z = line.split(":")
@@ -164,7 +164,7 @@ class BlockManagerMasterEndpoint(
       peerProfile(z(1).toInt) = z(0).toInt
     }
   }
-
+  ///////////////////////////////////////////////////////////////////////////////////
 
 
   override def receiveAndReply(context: RpcCallContext): PartialFunction[Any, Unit] = {
@@ -254,7 +254,7 @@ class BlockManagerMasterEndpoint(
     // case ReportRefMap(blockManagerId, currentRefMap) =>
     // logInfo(s"yyh: received from $blockManagerId, $currentRefMap")
     // context.reply(true)
-
+    ///////////////////////////////////////////////////////////////////////////
 
   }
 
@@ -655,6 +655,21 @@ class BlockManagerMasterEndpoint(
   }
 
   override def onStop(): Unit = {
+    /////////////////////////////////////////////////////////////////////////////
+    val stopTime = System.currentTimeMillis
+    val duration = stopTime - startTime
+    RDDHit = totalReference - RDDMiss // yyh: align total reference count
+    if (RDDHit < 0 ) RDDHit = 0
+    logInfo(s"LRC: log stoptime: $stopTime, duration: $duration ms")
+    logInfo(s"LRC: Closing blockMangerMasterEndPoint, RDD hit $RDDHit, RDD miss $RDDMiss")
+    logInfo(s"LRC Disk read count: $diskRead, disk write count: $diskWrite")
+    // val path = System.getProperty("user.dir")
+    val appName = conf.getAppName
+    val fw = new FileWriter("result.txt", true) // true means append mode
+    fw.write(s"AppName: $appName, Runtime: $duration\n")
+    fw.write(s"RDD Hit\t$RDDHit\tRDD Miss\t$RDDMiss\n")
+    fw.close()
+    /////////////////////////////////////////////////////////////////////////////
     stop_clean_ref()
     askThreadPool.shutdownNow()
   }

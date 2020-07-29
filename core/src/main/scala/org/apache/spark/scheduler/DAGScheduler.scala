@@ -17,7 +17,7 @@
 
 package org.apache.spark.scheduler
 
-import java.io.{File, PrintWriter, NotSerializableException}
+import java.io.{File, NotSerializableException, PrintWriter}
 import java.util.Properties
 import java.util.concurrent.{ConcurrentHashMap, TimeUnit}
 import java.util.concurrent.atomic.AtomicInteger
@@ -25,7 +25,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import scala.annotation.tailrec
 import scala.collection.Map
 import scala.collection.mutable
-import scala.collection.mutable.{HashMap, HashSet, ListBuffer, Queue}
+import scala.collection.mutable.{HashMap, HashSet, ListBuffer, Queue, Stack}
 import scala.concurrent.duration._
 import scala.util.control.NonFatal
 
@@ -149,7 +149,10 @@ private[spark] class DAGScheduler(
   private[scheduler] val jobIdToActiveJob = new HashMap[Int, ActiveJob]
 
 
-  // Reference count for rdds
+  /**
+   * Bing
+   * RDD reference count: ID --> Reference
+   */
   private val rddIdToRefCount = new HashMap[Int, Int]
 
 
@@ -602,16 +605,22 @@ private[spark] class DAGScheduler(
 
 
   private def profileRefCountStageByStage(rdd: RDD[_], jobId: Int): Unit = {
-    logWarning("zcl: profiling" + " jobId " + jobId + " rdd: " + rdd.id
+    logWarning("LRC: profiling" + " jobId " + jobId + " rdd: " + rdd.id
       + " " + rdd.getStorageLevel.useMemory)
+
     val refCountByJob = new HashMap[Int, Int]
+
     profileRefCountOneStage(rdd, jobId, refCountByJob)
+
     while (!waitingReStages.isEmpty) {
       profileRefCountOneStage(waitingReStages.dequeue(), jobId, refCountByJob)
     }
-    logWarning("zcl: profiling" + " jobId " + jobId + "done" + " rdd: " + rdd.id)
+
+    logWarning("LRC: profiling" + " jobId " + jobId + "done" + " rdd: " + rdd.id)
+
     val numberOfRDDPartitions = rdd.getNumPartitions
     blockManagerMaster.broadcastRefCount(jobId, numberOfRDDPartitions, refCountByJob)
+
     writeRefCountToFile(jobId, refCountByJob)
   }
 
@@ -619,12 +628,13 @@ private[spark] class DAGScheduler(
                                       refCountById: HashMap[Int, Int]): Unit = {
     // RDDs pending to visit in the same stage
     val waitingForVisit = new Stack[RDD[_]]
+
     // Last in memory RDD ref count should sub 1
     var newInMemoryRDDs: mutable.MutableList[Int] = mutable.MutableList()
+
     // if the final RDD of this stage is in memory
-    if (rdd.getStorageLevel.useMemory) {
-      newInMemoryRDDs += rdd.id
-    }
+    if (rdd.getStorageLevel.useMemory) newInMemoryRDDs += rdd.id
+
     // Dont start with the same RDD twice
     if (!visitedStageRDDs.contains(rdd.id)) {
       visitedStageRDDs += rdd.id
@@ -632,6 +642,7 @@ private[spark] class DAGScheduler(
       logWarning("zcl: visited stage rdd: " + rdd.id + " skip")
       return
     }
+
     def visit(rdd: RDD[_]): Unit = {
       // Expending a RDD
       if (rdd.getStorageLevel.useMemory) {
@@ -694,17 +705,13 @@ private[spark] class DAGScheduler(
     while (waitingForVisit.nonEmpty) {
       visit(waitingForVisit.pop())
     }
+
     // Drop 1 ref count of the in memory RDD with the biggest id
     if (newInMemoryRDDs.length > 0) {
       for (can <- newInMemoryRDDs) {
-        logWarning("zcl: droping new in stage RDD: " + can)
-        if (refCountById.contains(can)) {
-          refCountById -= can
-        }
-        if (rddIdToRefCount.contains(can)) {
-          rddIdToRefCount -= can
-        }
-
+        logWarning("LRC: droping new in stage RDD: " + can)
+        if (refCountById.contains(can)) refCountById -= can
+        if (rddIdToRefCount.contains(can)) rddIdToRefCount -= can
       }
     }
   }
@@ -712,13 +719,20 @@ private[spark] class DAGScheduler(
   private def writeRefCountToFile(jobId: Int, refCountById: HashMap[Int, Int]): Unit = {
     val des = System.getProperty("user.home") + File.separator +
       "Documents" + File.separator + "counts" + File.separator + jobId + ".txt";
+
     val pw = new PrintWriter(des)
+
     val it = rddIdToRefCount.keySet.toList.sortWith(_ < _)
+
     it.foreach( k => pw.write(k + ": " + rddIdToRefCount(k) + "\n"))
+
     // rddIdToRefCount.clear()
     pw.write("\n\n")
+
     val it1 = refCountById.keySet.toList.sortWith(_ < _)
+
     it1.foreach( k => pw.write(k + ": " + refCountById(k) + "\n"))
+
     pw.close()
   }
 
@@ -835,6 +849,7 @@ private[spark] class DAGScheduler(
     }
 
     val jobId = nextJobId.getAndIncrement()
+    // blockManagerMaster.broadcastJobId(jobId)
     if (partitions.isEmpty) {
       val clonedProperties = Utils.cloneProperties(properties)
       if (sc.getLocalProperty(SparkContext.SPARK_JOB_DESCRIPTION) == null) {
@@ -852,6 +867,7 @@ private[spark] class DAGScheduler(
     assert(partitions.nonEmpty)
     val func2 = func.asInstanceOf[(TaskContext, Iterator[_]) => _]
     val waiter = new JobWaiter[U](this, jobId, partitions.size, resultHandler)
+    // profileRefCountSimple(rdd, jobId)
     eventProcessLoop.post(JobSubmitted(
       jobId, rdd, func2, partitions.toArray, callSite, waiter,
       Utils.cloneProperties(properties)))
@@ -1177,8 +1193,9 @@ private[spark] class DAGScheduler(
     listenerBus.post(
       SparkListenerJobStart(job.jobId, jobSubmissionTime, stageInfos, properties))
 
-
-    // zcl: profile ref count before construction of stages
+    /**
+     * zcl: profile ref count before construction of stages
+     */
     // profileRefCount(finalStage, jobId)
     // profileRefCountSimple(finalStage, jobId)
     profileRefCountStageByStage(finalRDD, jobId)
