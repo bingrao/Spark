@@ -44,7 +44,8 @@ import org.apache.spark.util.io.ChunkedByteBuffer
 private[spark] class DiskStore(
     conf: SparkConf,
     diskManager: DiskBlockManager,
-    securityManager: SecurityManager) extends Logging {
+    securityManager: SecurityManager,
+    blockManager: BlockManager) extends Logging {
 
   private val minMemoryMapBytes = conf.get(config.STORAGE_MEMORY_MAP_THRESHOLD)
   private val maxMemoryMapBytes = conf.get(config.MEMORY_MAP_LIMIT_FOR_TESTS)
@@ -62,6 +63,13 @@ private[spark] class DiskStore(
       throw new IllegalStateException(s"Block $blockId is already present in the disk store")
     }
     logDebug(s"Attempting to put block $blockId")
+
+    if (blockId.isRDD) {
+      logInfo(s"LRC: putting Bytes of $blockId directly to the disk")
+      blockManager.checkPeerLoss(blockId) // yyh: check whether to tell the driverEndPoint
+      blockManager.diskWrite += 1
+    }
+
     val startTimeNs = System.nanoTime()
     val file = diskManager.getFile(blockId)
     val out = new CountingWritableChannel(openForWrite(file))
@@ -96,17 +104,25 @@ private[spark] class DiskStore(
   }
 
   def getBytes(blockId: BlockId): BlockData = {
-    getBytes(diskManager.getFile(blockId.name), getSize(blockId))
+    getBytes(diskManager.getFile(blockId.name), getSize(blockId), blockId)
   }
 
-  def getBytes(f: File, blockSize: Long): BlockData = securityManager.getIOEncryptionKey() match {
-    case Some(key) =>
-      // Encrypted blocks cannot be memory mapped; return a special object that does decryption
-      // and provides InputStream / FileRegion implementations for reading the data.
-      new EncryptedBlockData(f, blockSize, conf, key)
+  def getBytes(f: File, blockSize: Long, blockId: BlockId): BlockData = {
 
-    case _ =>
-      new DiskBlockData(minMemoryMapBytes, maxMemoryMapBytes, f, blockSize)
+    if (blockId.isRDD) {
+      logInfo(s"LRC: Getting Bytes of $blockId directly from disk")
+      blockManager.diskRead += 1
+    }
+
+    securityManager.getIOEncryptionKey() match {
+      case Some(key) =>
+        // Encrypted blocks cannot be memory mapped; return a special object that does decryption
+        // and provides InputStream / FileRegion implementations for reading the data.
+        new EncryptedBlockData(f, blockSize, conf, key)
+
+      case _ =>
+        new DiskBlockData(minMemoryMapBytes, maxMemoryMapBytes, f, blockSize)
+    }
   }
 
   def remove(blockId: BlockId): Boolean = {

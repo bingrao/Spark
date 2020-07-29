@@ -18,6 +18,8 @@
 package org.apache.spark.rdd
 
 import scala.reflect.ClassTag
+import scala.concurrent.Await
+import scala.concurrent.duration.Duration
 
 import org.apache.spark._
 import org.apache.spark.storage.{BlockId, BlockManager}
@@ -44,11 +46,20 @@ class BlockRDD[T: ClassTag](sc: SparkContext, @transient val blockIds: Array[Blo
     assertValid()
     val blockManager = SparkEnv.get.blockManager
     val blockId = split.asInstanceOf[BlockRDDPartition].blockId
-    blockManager.get[T](blockId) match {
+
+    val data = blockManager.get_future(blockId) // yyh get block rdd, do not block the sender
+    val data1 = Await.result(data, Duration.Inf)
+    data1 match {
       case Some(block) => block.data.asInstanceOf[Iterator[T]]
       case None =>
-        throw new Exception(s"Could not compute split, block $blockId of RDD $id not found")
+        throw new Exception("Could not compute split, block " + blockId + " not found")
     }
+
+//    blockManager.get[T](blockId) match {
+//      case Some(block) => block.data.asInstanceOf[Iterator[T]]
+//      case None =>
+//        throw new Exception(s"Could not compute split, block $blockId of RDD $id not found")
+//    }
   }
 
   override def getPreferredLocations(split: Partition): Seq[String] = {

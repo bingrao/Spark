@@ -458,6 +458,12 @@ class SparkConf(loadDefaults: Boolean) extends Cloneable with Logging with Seria
    */
   def getAppId: String = get("spark.app.id")
 
+  /**
+   * Bing Returns the spark applciation name
+   * @return
+   */
+  def getAppName: String = get("spark.app.name")
+
   /** Does the configuration contain a given parameter? */
   def contains(key: String): Boolean = {
     settings.containsKey(key) ||

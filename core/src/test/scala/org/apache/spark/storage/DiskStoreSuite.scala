@@ -49,13 +49,13 @@ class DiskStoreSuite extends SparkFunSuite {
     val diskBlockManager = new DiskBlockManager(conf, deleteFilesOnStop = true)
 
     val diskStoreMapped = new DiskStore(conf.clone().set(confKey, "0"), diskBlockManager,
-      securityManager)
+      securityManager, null)
     diskStoreMapped.putBytes(blockId, byteBuffer)
     val mapped = diskStoreMapped.getBytes(blockId).toByteBuffer()
     assert(diskStoreMapped.remove(blockId))
 
     val diskStoreNotMapped = new DiskStore(conf.clone().set(confKey, "1m"), diskBlockManager,
-      securityManager)
+      securityManager, null)
     diskStoreNotMapped.putBytes(blockId, byteBuffer)
     val notMapped = diskStoreNotMapped.getBytes(blockId).toByteBuffer()
 
@@ -78,7 +78,7 @@ class DiskStoreSuite extends SparkFunSuite {
   test("block size tracking") {
     val conf = new SparkConf()
     val diskBlockManager = new DiskBlockManager(conf, deleteFilesOnStop = true)
-    val diskStore = new DiskStore(conf, diskBlockManager, new SecurityManager(conf))
+    val diskStore = new DiskStore(conf, diskBlockManager, new SecurityManager(conf), null)
 
     val blockId = BlockId("rdd_1_2")
     diskStore.put(blockId) { chan =>
@@ -97,7 +97,7 @@ class DiskStoreSuite extends SparkFunSuite {
     val conf = new SparkConf()
       .set(config.MEMORY_MAP_LIMIT_FOR_TESTS.key, "10k")
     val diskBlockManager = new DiskBlockManager(conf, deleteFilesOnStop = true)
-    val diskStore = new DiskStore(conf, diskBlockManager, new SecurityManager(conf))
+    val diskStore = new DiskStore(conf, diskBlockManager, new SecurityManager(conf), null)
 
     val blockId = BlockId("rdd_1_2")
     diskStore.put(blockId) { chan =>
@@ -138,7 +138,7 @@ class DiskStoreSuite extends SparkFunSuite {
     val conf = new SparkConf()
     val securityManager = new SecurityManager(conf, Some(CryptoStreamUtils.createKey(conf)))
     val diskBlockManager = new DiskBlockManager(conf, deleteFilesOnStop = true)
-    val diskStore = new DiskStore(conf, diskBlockManager, securityManager)
+    val diskStore = new DiskStore(conf, diskBlockManager, securityManager, null)
 
     val blockId = BlockId("rdd_1_2")
     diskStore.put(blockId) { chan =>
