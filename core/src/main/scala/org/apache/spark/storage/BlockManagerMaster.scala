@@ -19,6 +19,9 @@ package org.apache.spark.storage
 
 import scala.collection.generic.CanBuildFrom
 import scala.collection.immutable.Iterable
+import scala.collection.immutable.List
+import scala.collection.mutable
+import scala.collection.mutable.HashMap
 import scala.concurrent.Future
 
 import org.apache.spark.{SparkConf, SparkException}
@@ -247,6 +250,58 @@ class BlockManagerMaster(
     if (!driverEndpoint.askSync[Boolean](message)) {
       throw new SparkException("BlockManagerMasterEndpoint returned false, expected true.")
     }
+  }
+
+  ////////////////////////////////////////////////////////////////////////////
+
+  /**
+   * yyh, report to the driver the hit and miss count on this blockmanager
+   */
+  def reportCacheHit(blockManagerId: BlockManagerId, list: List[Int],
+                     hitBlockList: mutable.MutableList[BlockId]): Boolean = {
+    driverEndpoint.askSync[Boolean](ReportCacheHit(blockManagerId, list, hitBlockList))
+  }
+
+  /**
+   * yyh, get the refProfile from the driver, including appDAG, jobDAGs and peer information
+   */
+  def getRefProfile(blockManagerId: BlockManagerId, slaveEndPoint: RpcEndpointRef):
+  (mutable.HashMap[Int, Int], mutable.HashMap[Int, mutable.HashMap[Int, Int]],
+    mutable.HashMap[Int, Int]) = {
+    logInfo(s"LRC: $blockManagerId try to get refprofile from the master endpoint")
+    driverEndpoint.askSync[(mutable.HashMap[Int, Int], mutable.HashMap[Int,
+      mutable.HashMap[Int, Int]], mutable.HashMap[Int, Int])](GetRefProfile
+    (blockManagerId, slaveEndPoint))
+  }
+
+  /**
+   * yyh report the current ref map to the driver. For debug
+   */
+  // def reportRefMap(blockManagerId: BlockManagerId, refMap: mutable.Map[BlockId, Int]): Unit = {
+  //  driverEndpoint.askWithRetry[Boolean](ReportRefMap(blockManagerId, refMap))
+  // }
+
+  /**
+   * yyh, for all-or-nothing
+   * If a block with peer is evicted, tell the master
+   */
+  /**
+   * yyh, get the refProfile from the driver, including appDAG, jobDAGs and peer information
+   */
+  def reportBlockEviction(blockId: BlockId): Unit = {
+    logInfo(s"LRC: $blockId is evicted, tell the master as it has a peer")
+    driverEndpoint.askSync[Boolean](BlockWithPeerEvicted(blockId))
+  }
+
+  /** Broadcast the JobId */
+  def broadcastJobId(jobId: Int): Unit = {
+    tell(StartBroadcastJobId(jobId))
+  }
+
+  /** Broadcast reference count */
+  def broadcastRefCount(jobId: Int, numberOfRDDPartitions: Int,
+                        refCount: HashMap[Int, Int]): Unit = {
+    tell(StartBroadcastRefCount(jobId, numberOfRDDPartitions, refCount))
   }
 
 }

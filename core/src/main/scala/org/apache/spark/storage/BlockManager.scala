@@ -24,9 +24,11 @@ import java.nio.channels.Channels
 import java.util.Collections
 import java.util.concurrent.{CompletableFuture, ConcurrentHashMap, TimeUnit}
 
+import scala.collection.immutable.List
 import scala.collection.mutable
 import scala.collection.mutable.HashMap
 import scala.concurrent.{ExecutionContext, Future}
+import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration._
 import scala.reflect.ClassTag
 import scala.util.{Failure, Random, Success, Try}
@@ -54,6 +56,7 @@ import org.apache.spark.rpc.RpcEnv
 import org.apache.spark.scheduler.ExecutorCacheTaskLocation
 import org.apache.spark.serializer.{SerializerInstance, SerializerManager}
 import org.apache.spark.shuffle.{ShuffleManager, ShuffleWriteMetricsReporter}
+import org.apache.spark.storage.BlockManagerMessages.{BlockWithPeerEvicted}
 import org.apache.spark.storage.memory._
 import org.apache.spark.unsafe.Platform
 import org.apache.spark.util._
@@ -199,7 +202,7 @@ private[spark] class BlockManager(
   // Actual storage of where blocks are kept
   private[spark] val memoryStore =
     new MemoryStore(conf, blockInfoManager, serializerManager, memoryManager, this)
-  private[spark] val diskStore = new DiskStore(conf, diskBlockManager, securityManager)
+  private[spark] val diskStore = new DiskStore(conf, diskBlockManager, securityManager, this)
   memoryManager.setMemoryStore(memoryStore)
 
   // Note: depending on the memory manager, `maxMemory` may actually vary over time.
@@ -419,7 +422,7 @@ private[spark] class BlockManager(
       blockData().toChunkedByteBuffer(allocator)
     }
 
-    override def blockData(): BlockData = diskStore.getBytes(tmpFile, blockSize)
+    override def blockData(): BlockData = diskStore.getBytes(tmpFile, blockSize, blockId)
 
     override def saveToDiskStore(): Unit = diskStore.moveFileToBlock(tmpFile, blockSize, blockId)
 
@@ -430,6 +433,33 @@ private[spark] class BlockManager(
     }
 
   }
+
+  //////////////////////////////////////////////////////////////////////////////////////////////////
+  /**
+   * Bing: Add statistical infromation about RDD refernce
+   */
+
+  var refProfile = mutable.HashMap[Int, Int]() // yyh
+  // job refProfile profiled offline
+  var refProfile_by_Job = mutable.HashMap[Int, mutable.HashMap[Int, Int]]()
+  var refProfile_online = mutable.HashMap[Int, Int]() // refProfile maintained online
+  // Be careful that refProfile_online is replaced once a new job is submitted: no parallel jobs!
+  var peers = mutable.HashMap[Int, Int]()
+  var peerLostBlocks = new mutable.MutableList[BlockId] // yyh for all-or-nothing property
+  // for those blocks that have lost their peers
+  // Be careful that currently we do not consider re-admission of their peers.
+  // var decreaseRDDList = new mutable.MutableList[Int] // yyh for strict all-or-nothing
+  // var hitBlockList = new mutable.MutableList[BlockId] // for record of effective hit
+  // var missBlockList = new mutable.MutableList[BlockId] // for record of effective hit
+  // rdd ID to the list of cache hit blocks: currently assume each block is only referenced once
+  var missRDDBlocks = mutable.MutableList[BlockId]()
+  var hitRDDBlocks = mutable.MutableList[BlockId]()
+
+  private var hitCount = 0 // hit count of rdd blocks
+  private var missCount = 0 // miss count of rdd blocks
+  var diskRead = 0 // count of disk read
+  var diskWrite = 0 // count of disk write
+  //////////////////////////////////////////////////////////////////////////////////////////////////
 
   /**
    * Initializes the BlockManager with the given appId. This is not performed in the constructor as
@@ -464,6 +494,25 @@ private[spark] class BlockManager(
       slaveEndpoint)
 
     blockManagerId = if (idFromMaster != null) idFromMaster else id
+
+    ///////////////////////////////////////////////////////////////////////////////
+    /**
+     * Bing: INITIIAL
+     */
+    logInfo(s"LRC: block manager $blockManagerId has been registered, now try to get refProfile")
+    val (appDAG, jobDAG, peerProfile) = master.getRefProfile(blockManagerId, slaveEndpoint)
+    // yyh: we can't assign values to a var tuple. Use val tuple instead.
+    refProfile = mutable.HashMap(appDAG.toSeq: _*)
+    refProfile_by_Job = mutable.HashMap(jobDAG.toSeq: _*)
+    peers = mutable.HashMap(peerProfile.toSeq: _*)
+    printf("RefProfile:\n")
+    for ((k, v) <- refProfile) printf("key: %s, value: %s\n", k, v)
+    printf("Peers:\n")
+    for ((k, v) <- peers) printf("key: %s, value: %s\n", k, v)
+    // for ((k, v) <- peers) memoryStore.stickyLog.write("key: $k, value: $v\n")
+    logInfo(s"LRC: block manager $blockManagerId has read the refProfile")
+    // for ((k, v) <- refProfile) printf("key: %s, value: %s\n", k, v)
+    ///////////////////////////////////////////////////////////////////////////////
 
     shuffleServerId = if (externalShuffleServiceEnabled) {
       logInfo(s"external shuffle service port = $externalShuffleServicePort")
@@ -809,6 +858,18 @@ private[spark] class BlockManager(
             serializerManager.dataDeserializeStream(
               blockId, memoryStore.getBytes(blockId).get.toInputStream())(info.classTag)
           }
+
+          ////////////////////////////////////////////////////////////////////////////
+          if (blockId.isRDD) {
+            logInfo(s"LRC: Cache Hit: $blockId, will deduct its referenced count by 1")
+            this.synchronized {
+              hitCount += 1
+            }
+            memoryStore.deductRefCountByBlockIdHit(blockId)
+          }
+          ////////////////////////////////////////////////////////////////////////////
+
+
           // We need to capture the current taskId in case the iterator completion is triggered
           // from a different thread which does not have TaskContext set; see SPARK-18406 for
           // discussion.
@@ -831,6 +892,21 @@ private[spark] class BlockManager(
               serializerManager.dataDeserializeStream(blockId, stream)(info.classTag)
             }
           }
+
+          ////////////////////////////////////////////////////////////////////////////
+          if (blockId.isRDD) {
+            val rddId = blockId.asRDDId.toString.split("_")(1).toInt
+            if(refProfile_online.contains(rddId)) {
+              logInfo(s"LRC: RDD block Cache Miss: $blockId, " +
+                s"will deduct its referenced count by 1")
+              this.synchronized {
+                missCount += 1
+              }
+              memoryStore.deductRefCountByBlockIdMiss(blockId)
+            }
+          }
+          ////////////////////////////////////////////////////////////////////////////
+
           val ci = CompletionIterator[Any, Iterator[Any]](iterToReturn, {
             releaseLockAndDispose(blockId, diskData, taskContext)
           })
@@ -864,12 +940,30 @@ private[spark] class BlockManager(
     if (level.deserialized) {
       // Try to avoid expensive serialization by reading a pre-serialized copy from disk:
       if (level.useDisk && diskStore.contains(blockId)) {
+
+        ////////////////////////////////////////////////////////////////////////////
+        if (blockId.isRDD) {
+          val rddId = blockId.asRDDId.toString.split("_")(1).toInt
+          if(refProfile_online.contains(rddId)) {
+            logInfo(s"LRC: RDD block Cache Miss: $blockId, " +
+              s"will deduct its referenced count by 1")
+            this.synchronized {
+              missCount += 1
+            }
+            memoryStore.deductRefCountByBlockIdMiss(blockId)
+          }
+        }
+        ////////////////////////////////////////////////////////////////////////////
+
         // Note: we purposely do not try to put the block back into memory here. Since this branch
         // handles deserialized blocks, this block may only be cached in memory as objects, not
         // serialized bytes. Because the caller only requested bytes, it doesn't make sense to
         // cache the block's deserialized objects since that caching may not have a payoff.
         diskStore.getBytes(blockId)
       } else if (level.useMemory && memoryStore.contains(blockId)) {
+
+
+
         // The block was not found on disk, so serialize an in-memory copy:
         new ByteBufferBlockData(serializerManager.dataSerializeWithExplicitClassTag(
           blockId, memoryStore.getValues(blockId).get, info.classTag), true)
@@ -878,8 +972,30 @@ private[spark] class BlockManager(
       }
     } else {  // storage level is serialized
       if (level.useMemory && memoryStore.contains(blockId)) {
+        ////////////////////////////////////////////////////////////////////////////
+        if (blockId.isRDD) {
+          logInfo(s"LRC: Cache Hit: $blockId, will deduct its referenced count by 1")
+          this.synchronized {
+            hitCount += 1
+          }
+          memoryStore.deductRefCountByBlockIdHit(blockId)
+        }
+        ////////////////////////////////////////////////////////////////////////////
         new ByteBufferBlockData(memoryStore.getBytes(blockId).get, false)
       } else if (level.useDisk && diskStore.contains(blockId)) {
+        ////////////////////////////////////////////////////////////////////////////
+        if (blockId.isRDD) {
+          val rddId = blockId.asRDDId.toString.split("_")(1).toInt
+          if(refProfile_online.contains(rddId)) {
+            logInfo(s"LRC: RDD block Cache Miss: $blockId, " +
+              s"will deduct its referenced count by 1")
+            this.synchronized {
+              missCount += 1
+            }
+            memoryStore.deductRefCountByBlockIdMiss(blockId)
+          }
+        }
+        ////////////////////////////////////////////////////////////////////////////
         val diskData = diskStore.getBytes(blockId)
         maybeCacheDiskBytesInMemory(info, blockId, level, diskData)
           .map(new ByteBufferBlockData(_, false))
@@ -1701,7 +1817,7 @@ private[spark] class BlockManager(
   private[storage] override def dropFromMemory[T: ClassTag](
       blockId: BlockId,
       data: () => Either[Array[T], ChunkedByteBuffer]): StorageLevel = {
-    logInfo(s"Dropping block $blockId from memory")
+    logInfo(s"LRC: Dropping block $blockId from memory")
     val info = blockInfoManager.assertBlockIsLockedForWriting(blockId)
     var blockIsUpdated = false
     val level = info.level
@@ -1826,6 +1942,12 @@ private[spark] class BlockManager(
   }
 
   def stop(): Unit = {
+
+    logInfo(s"LRC: BlockManager on executor $executorId is stopped here, " +
+      "report to the master-actor hit and miss count")
+    reportCacheHit()
+    memoryStore.stickyLog.close()
+
     blockTransferService.close()
     if (blockStoreClient ne blockTransferService) {
       // Closing should be idempotent, but maybe not for the NioBlockTransferService.
@@ -1838,6 +1960,121 @@ private[spark] class BlockManager(
     memoryStore.clear()
     futureExecutionContext.shutdownNow()
     logInfo("BlockManager stopped")
+  }
+
+
+
+
+  /////////////////////////////////////////////////////////////////////////////////////////
+
+  /**
+   * yyh On putting rdd blocks in the disk, check whether this block has peers
+   * If yes, tell the driverEndPoint
+   */
+
+  def checkPeerLoss(blockId: BlockId): Unit = {
+    memoryStore.stickyLog.write(s"On eviction of $blockId, check peer loss\n")
+    if (memoryStore.refMap.getOrElse(blockId, 0) > 0 // this block has remaining ref count
+      && peers.contains(blockId.asRDDId.toString.split("_")(1).toInt)) {
+      // if this block still has remaining ref count, it means its peer has not been evicted
+      missRDDBlocks.synchronized {
+        missRDDBlocks += blockId
+      }
+      logInfo(s"LRC: $blockId is going to be written into the disk" +
+        s" with nonzero ref count, notify the master of its loss")
+      memoryStore.stickyLog.write(s"Report the loss of $blockId\n")
+      master.driverEndpoint.askSync[Boolean](BlockWithPeerEvicted(blockId))
+    }
+
+  }
+
+
+  /** yyh
+  // Update the refProfile_online upon job submission
+  // If thisRefProfile is not provided, read it from the offline profile given the job ID
+  // Structure of thisRefProfile: Map(RDDID -> Int))
+  //                   scala.collection.mutable.HashMap
+  //// Notice that the 'Peer' is optional. An RDD has at most one peer since no operation
+  ////  handles more than two RDDs at the same time
+   */
+  def updateRefProfile(jobId: Int, thisRefProfile: Option[mutable.HashMap[Int, Int]]):
+  (mutable.HashMap[BlockId, Int], mutable.HashMap[BlockId, Int]) = {
+    // tell the driver the current ref map: for debug
+    // master.reportRefMap(blockManagerId, memoryStore.currentRefMap)
+    var this_job = new mutable.HashMap[Int, Int]
+    if (thisRefProfile.isEmpty) {
+      // read job dag from profie
+      val jobProfile = refProfile_by_Job.get(jobId)
+      if (jobProfile.isDefined) {
+        logInfo(s"LRC: read refProfile of job $jobId: $jobProfile")
+        this_job = jobProfile.get
+      }
+      else {
+        logInfo(s"LRC: refProfile of job $jobId not found!")
+      }
+      // logInfo(s"yyh:  before merge: $refProfile_online")
+      // mergeRefProfile(jobProfile)
+      // logInfo(s"yyh:  after merge: $refProfile_online")
+    }
+    else {
+      logInfo(s"LRC: received refProfile of job $jobId: $thisRefProfile")
+      this_job = thisRefProfile.get
+      // logInfo(s"yyh:  before merge: $refProfile_online")
+      // mergeRefProfile(thisRefProfile.get)
+      // logInfo(s"yyh:  before merge: $refProfile_online")
+    }
+
+    // Update the refProfile-online: if the RDD ID already exists, replace it
+    // because there is no shared RDD among tenants and no parallel jobs of a single tenant
+    // if it does not exists, create a new key.
+    refProfile_online ++= this_job
+
+
+    // Tell the memoryStore to update the ref counts of the existing blocks
+    // yyh !!! only update it for online job DAG !!!! comment the code in the memorystore
+    // memoryStore.updateRefCountByJobDAG(this_job)
+    (memoryStore.currentRefMap, memoryStore.refMap)
+  }
+  /**
+  private def mergeRefProfile(thisRefProfile: mutable.Map[Int, Int]): Unit = {
+    refProfile_online = refProfile_online ++
+    thisRefProfile.map{ case (k, v) => k -> ( v + refProfile_online.getOrElse(k, 0))}
+    //   ++ : merge the right map to the left. for the shared key, use the value of the right map
+  }
+   */
+
+  def reportCacheHit(): Unit = {
+    logInfo(s"LRC: $blockManagerId reporting Cache hit to the master, " +
+      s"hit $hitCount, miss $missCount")
+    if (!master.reportCacheHit(blockManagerId, List(hitCount, missCount, diskRead, diskWrite),
+      hitRDDBlocks)) {
+      logError(s"$blockManagerId failed to report Cache hit to master; giving up.")
+      return
+    }
+  }
+
+  /**
+   * yyh get block in a non-blocking way.
+   * Get a block from the block manager (either local or remote).
+   *
+   */
+  def get_future(blockId: BlockId): Future[Option[BlockResult]] = {
+    val local = Future { getLocalValues(blockId)}
+    val blockData = for ( localData <- local) yield {
+      if (localData.isDefined) {
+        logInfo(s"Found block $blockId locally")
+        localData
+      }
+      else {
+        val remote = getRemoteValues(blockId)
+        if (remote.isDefined) {
+          logInfo(s"Found block $blockId remotely")
+          remote
+        }
+        else None
+      }
+    }
+    blockData
   }
 }
 
