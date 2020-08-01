@@ -604,12 +604,12 @@ class BlockManagerMasterEndpoint(
     logInfo(s"Update Block ${blockId}_${storageLevel}_${memSize}_${diskSize} " +
       s"to Manager_${blockManagerId} @ ${System.currentTimeMillis}")
     blockManagerInfo.foreach { case (blockManagerId, blockManagerInfo) =>
-      logInfo(s"The Block Manager ID ${id}")
+      logInfo(s"The Block Manager ID ${blockManagerId}")
       blockManagerInfo.blocks.asScala.foreach{ case (blockID, blockStatus) =>
         logInfo(s"Block: ${blockID} -> ${blockStatus}")
       }
     }
-    
+
     true
   }
 
