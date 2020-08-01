@@ -1228,7 +1228,7 @@ private[spark] class BlockManager(
       classTag: ClassTag[T],
       makeIterator: () => Iterator[T]): Either[BlockResult, Iterator[T]] = {
 
-    logInfo(s"LRC: Block {${blockId.name}, ${level}}, " +
+    logInfo(s"LRC: getOrElseUpdate Block {${blockId.name}, ${level}}, " +
       s"The Block Info Size ${blockInfoManager.size}, " +
       s"Memory Store Size ${memoryStore.size}, Disk Store Size ${diskStore.size}")
 
@@ -1336,6 +1336,10 @@ private[spark] class BlockManager(
 
     require(blockId != null, "BlockId is null")
     require(level != null && level.isValid, "StorageLevel is null or invalid")
+
+    logInfo(s"LRC: doPut Block {${blockId.name}, ${level}}, " +
+      s"The Block Info Size ${blockInfoManager.size}, " +
+      s"Memory Store Size ${memoryStore.size}, Disk Store Size ${diskStore.size}")
 
     val putBlockInfo = {
       val newInfo = new BlockInfo(level, classTag, tellMaster)
