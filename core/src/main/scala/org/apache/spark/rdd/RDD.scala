@@ -309,6 +309,7 @@ abstract class RDD[T: ClassTag](
    * subclasses of RDD.
    */
   final def iterator(split: Partition, context: TaskContext): Iterator[T] = {
+    logInfo(s"LRC: Interator: The Computing RDD_${id}_${storageLevel}")
     if (storageLevel != StorageLevel.NONE) {
       getOrCompute(split, context)
     } else {
@@ -348,6 +349,7 @@ abstract class RDD[T: ClassTag](
     if (isCheckpointedAndMaterialized) {
       firstParent[T].iterator(split, context)
     } else {
+      logInfo(s"LRC: computeOrReadCheckpoint: The Computing RDD_${id}_${storageLevel}")
       compute(split, context)
     }
   }

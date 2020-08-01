@@ -703,8 +703,8 @@ class BlockManagerMasterEndpoint(
       val (currentRefMap, refMap) = bm.slaveEndpoint.askSync[(mutable.Map[BlockId, Int],
         mutable.Map[BlockId, Int])](BroadcastJobDAG(jobId, None))
 
-      logInfo(s"LRC: Updated CurrentRefMap from $bm: $currentRefMap")
-      logInfo(s"LRC: Updated RefMap from $bm: $refMap")
+      logInfo(s"LRC: Updated CurrentRefMap from ${bm.blockManagerId}: $currentRefMap")
+      logInfo(s"LRC: Updated RefMap from ${bm.blockManagerId}: $refMap")
     }
   }
 
@@ -735,9 +735,9 @@ class BlockManagerMasterEndpoint(
 
     }
     logInfo(s"LRC: Received Report from $blockManagerId: " +
-      s"RDD Hit count increased by ${list(0)}. now $RDDHit" +
-      s"RDD Miss count increased by ${list(1)}. now $RDDMiss" +
-      s"Disk Read count increased by ${list(2)}. now $diskRead" +
+      s"RDD Hit count increased by ${list(0)}. now $RDDHit, " +
+      s"RDD Miss count increased by ${list(1)}. now $RDDMiss, " +
+      s"Disk Read count increased by ${list(2)}. now $diskRead, " +
       s"Disk Write count increased by ${list(3)}. now $diskWrite"
     )
     this.synchronized { totalHitBlockList ++=  hitBlockList}

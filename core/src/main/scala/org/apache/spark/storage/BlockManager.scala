@@ -1233,6 +1233,7 @@ private[spark] class BlockManager(
       case Some(block) =>
         return Left(block)
       case _ =>
+        logInfo(s"LRC: Need to compute the block. RDD_${blockId}_${level}")
         // Need to compute the block.
     }
     // Initially we hold no locks on this block.
