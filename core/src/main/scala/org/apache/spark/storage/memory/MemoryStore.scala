@@ -815,6 +815,8 @@ private[spark] class MemoryStore(
   ////////////////////////////////////////////////////////////////////////////////////////////////
   // The following helper functions  is provided from LRC implementation
 
+  def size: Int = entries synchronized( entries.size())
+
   /**
    * yyh: Get the ref count of the to-cache block, no matter whether it is finally cached or not
    * @param blockId

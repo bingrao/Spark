@@ -1227,6 +1227,11 @@ private[spark] class BlockManager(
       level: StorageLevel,
       classTag: ClassTag[T],
       makeIterator: () => Iterator[T]): Either[BlockResult, Iterator[T]] = {
+
+    logInfo(s"LRC: Block {${blockId.name}, ${level}}, " +
+      s"The Block Info Size ${blockInfoManager.size}, " +
+      s"Memory Store Size ${memoryStore.size}, Disk Store Size ${diskStore.size}")
+
     // Attempt to read the block from local or remote storage. If it's present, then we don't need
     // to go through the local-get-or-put path.
     get[T](blockId)(classTag) match {

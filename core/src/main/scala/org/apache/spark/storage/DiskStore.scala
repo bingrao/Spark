@@ -50,7 +50,7 @@ private[spark] class DiskStore(
   private val minMemoryMapBytes = conf.get(config.STORAGE_MEMORY_MAP_THRESHOLD)
   private val maxMemoryMapBytes = conf.get(config.MEMORY_MAP_LIMIT_FOR_TESTS)
   private val blockSizes = new ConcurrentHashMap[BlockId, Long]()
-
+  def size: Long = blockSizes.size()
   def getSize(blockId: BlockId): Long = blockSizes.get(blockId)
 
   /**
