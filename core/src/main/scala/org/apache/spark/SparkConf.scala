@@ -17,14 +17,13 @@
 
 package org.apache.spark
 
+import java.io.File
 import java.util.{Map => JMap}
 import java.util.concurrent.ConcurrentHashMap
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable.LinkedHashSet
-
 import org.apache.avro.{Schema, SchemaNormalization}
-
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config._
 import org.apache.spark.internal.config.History._
@@ -463,6 +462,11 @@ class SparkConf(loadDefaults: Boolean) extends Cloneable with Logging with Seria
    * @return
    */
   def getAppName: String = get("spark.app.name")
+  val lrcRootPath = get("spark.local.dir") + File.separator + "lrc" +
+    File.separator + getAppName.filter(!" ".contains(_))
+  val dirPath = new File(lrcRootPath)
+  if (!dirPath.exists()) dirPath.mkdir()
+
 
   /** Does the configuration contain a given parameter? */
   def contains(key: String): Boolean = {

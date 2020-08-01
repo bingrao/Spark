@@ -16,8 +16,7 @@
  */
 
 package org.apache.spark.storage
-import java.io.FileWriter
-import java.io.IOException
+import java.io.{File, FileWriter, IOException}
 import java.nio.file.{Files, Paths}
 import java.util.{HashMap => JHashMap}
 import java.util.concurrent.TimeUnit
@@ -26,15 +25,13 @@ import scala.collection.JavaConverters._
 import scala.collection.immutable.List
 import scala.collection.mutable
 import scala.concurrent.{ExecutionContext, Future}
-import scala.io.Source // yyh
-
-
+import scala.io.Source
 import com.google.common.cache.CacheBuilder
-import scala.util.Random
 
+import scala.util.Random
 import org.apache.spark.{SparkConf, SparkException}
 import org.apache.spark.annotation.DeveloperApi
-import org.apache.spark.internal.{config, Logging}
+import org.apache.spark.internal.{Logging, config}
 import org.apache.spark.network.shuffle.ExternalBlockStoreClient
 import org.apache.spark.rpc.{IsolatedRpcEndpoint, RpcCallContext, RpcEndpointRef, RpcEnv}
 import org.apache.spark.scheduler._
@@ -115,9 +112,9 @@ class BlockManagerMasterEndpoint(
    * Reference Profile by application
    */
   private val refProfile = mutable.HashMap[Int, Int]() // yyh
-  private val appName = conf.getAppName.filter(!" ".contains(_))
-  val path = System.getProperty("user.dir")
-  val appDAG = path + "/" + appName + ".txt"
+  val prefixedPath = conf.lrcRootPath + File.pathSeparator +
+    conf.getAppName.filter(!" ".contains(_))
+  val appDAG = prefixedPath + ".txt"
   logInfo(s"LRC: Driver Endpoint tries to read profile: path: $appDAG")
   if (Files.exists(Paths.get(appDAG))) {
     for (line <- Source.fromFile(appDAG).getLines()) {
@@ -131,7 +128,7 @@ class BlockManagerMasterEndpoint(
    * Reference profile by job
    */
   private val refProfile_By_Job = mutable.HashMap[Int, mutable.HashMap[Int, Int]]()
-  val jobDAG = path + "/" + appName + "-JobDAG.txt"
+  val jobDAG = prefixedPath + "-JobDAG.txt"
   logInfo(s"LRC: Driver Endpoint tries to read profile by job: path: $jobDAG")
   if (Files.exists(Paths.get(jobDAG))) {
     for (line <- Source.fromFile(jobDAG).getLines()) {
@@ -161,7 +158,7 @@ class BlockManagerMasterEndpoint(
    * In the case where a block whose peer is already evicted, the BlockManger should not report.
    * */
   private val peerProfile = mutable.HashMap[Int, Int]()
-  val peers = path + "/" + appName + "-Peers.txt"
+  val peers = prefixedPath + "-Peers.txt"
   logInfo(s"LRC: Driver Endpoint tries to read peers profile: path :$peers")
   if (Files.exists(Paths.get(peers))) {
     for (line <- Source.fromFile(peers).getLines()) {
