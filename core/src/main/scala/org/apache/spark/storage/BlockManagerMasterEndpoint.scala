@@ -97,10 +97,7 @@ class BlockManagerMasterEndpoint(
   //   && conf.get(config.SHUFFLE_SERVICE_FETCH_RDD_ENABLED)`
   private val externalShuffleServiceRddFetchEnabled: Boolean = externalBlockStoreClient.isDefined
   private val externalShuffleServicePort: Int = StorageUtils.externalShuffleServicePort(conf)
-
-
-
-
+  
   ////////////////////////////////////////////////////////////////////////////////////////////////
   private val startTime = System.currentTimeMillis
   logInfo(s"LRC: Log start time: $startTime")
@@ -113,8 +110,11 @@ class BlockManagerMasterEndpoint(
   var taskHit = 0
   var stageHit = 0
   var totalHitBlockList = mutable.MutableList[BlockId]()
+
+  /**
+   * Reference Profile by application
+   */
   private val refProfile = mutable.HashMap[Int, Int]() // yyh
-  private val refProfile_By_Job = mutable.HashMap[Int, mutable.HashMap[Int, Int]]()
   private val appName = conf.getAppName.filter(!" ".contains(_))
   val path = System.getProperty("user.dir")
   val appDAG = path + "/" + appName + ".txt"
@@ -124,9 +124,13 @@ class BlockManagerMasterEndpoint(
       val z = line.split(":")
       refProfile(z(0).toInt) = z(1).toInt
     }
-    // refProfile(-1) = Int.MaxValue
   }
+  logInfo(s"LRC: Reference Profile by Application: ${refProfile}")
 
+  /**
+   * Reference profile by job
+   */
+  private val refProfile_By_Job = mutable.HashMap[Int, mutable.HashMap[Int, Int]]()
   val jobDAG = path + "/" + appName + "-JobDAG.txt"
   logInfo(s"LRC: Driver Endpoint tries to read profile by job: path: $jobDAG")
   if (Files.exists(Paths.get(jobDAG))) {
@@ -145,16 +149,18 @@ class BlockManagerMasterEndpoint(
       refProfile_By_Job(jobId) = this_refProfile
     }
   }
-  /** for all-or-nothing property */
+  logInfo(s"LRC: Reference Profile by Job: ${refProfile_By_Job}")
 
+  /**
+   * For all-or-nothing property
+   * Notice that each rdd has at most one peer rdd, as no operation handles more than two RDDs
+   * Be careful, here we only assume that all the peers are only required once.
+   * That means once either of the peer got evicted, it is safe to clear the ref count of the other
+   * for all-or-nothing considerations.
+   * It's the BlockManager on slaves who decide to report an eviction of a block with a peer or not.
+   * In the case where a block whose peer is already evicted, the BlockManger should not report.
+   * */
   private val peerProfile = mutable.HashMap[Int, Int]()
-  // Notice that each rdd has at most one peer rdd, as no operation handles more than two RDDs
-  // Be careful, here we only assume that all the peers are only required once.
-  // That means once either of the peer got evicted, it is safe to clear the ref count of the other
-  // for all-or-nothing considerations.
-  // It's the BlockManager on slaves who decide to report an eviction of a block with a peer or not.
-  // In the case where a block whose peer is already evicted, the BlockManger should not report.
-
   val peers = path + "/" + appName + "-Peers.txt"
   logInfo(s"LRC: Driver Endpoint tries to read peers profile: path :$peers")
   if (Files.exists(Paths.get(peers))) {
@@ -164,6 +170,7 @@ class BlockManagerMasterEndpoint(
       peerProfile(z(1).toInt) = z(0).toInt
     }
   }
+  logInfo(s"LRC: Reference Profile by Peer: ${peerProfile}")
   ///////////////////////////////////////////////////////////////////////////////////
 
 
@@ -236,6 +243,7 @@ class BlockManagerMasterEndpoint(
     case StartBroadcastJobId(jobId) =>
       broadcastJobDAG(jobId) // , refProfile_By_Job(jobId))
       context.reply(true)
+
     case ReportCacheHit(blockManagerId, list, hitBlockList) => // yyh
       updateCacheHit(blockManagerId, list, hitBlockList)
       context.reply(true)
@@ -255,7 +263,6 @@ class BlockManagerMasterEndpoint(
     // logInfo(s"yyh: received from $blockManagerId, $currentRefMap")
     // context.reply(true)
     ///////////////////////////////////////////////////////////////////////////
-
   }
 
   private def removeRdd(rddId: Int): Future[Seq[Int]] = {
@@ -655,33 +662,16 @@ class BlockManagerMasterEndpoint(
   }
 
   override def onStop(): Unit = {
-    /////////////////////////////////////////////////////////////////////////////
-    val stopTime = System.currentTimeMillis
-    val duration = stopTime - startTime
-    RDDHit = totalReference - RDDMiss // yyh: align total reference count
-    if (RDDHit < 0 ) RDDHit = 0
-    logInfo(s"LRC: log stoptime: $stopTime, duration: $duration ms")
-    logInfo(s"LRC: Closing blockMangerMasterEndPoint, RDD hit $RDDHit, RDD miss $RDDMiss")
-    logInfo(s"LRC Disk read count: $diskRead, disk write count: $diskWrite")
-    // val path = System.getProperty("user.dir")
-    val appName = conf.getAppName
-    val fw = new FileWriter("result.txt", true) // true means append mode
-    fw.write(s"AppName: $appName, Runtime: $duration\n")
-    fw.write(s"RDD Hit\t$RDDHit\tRDD Miss\t$RDDMiss\n")
-    fw.close()
-    /////////////////////////////////////////////////////////////////////////////
-    stop_clean_ref()
+    lrc_clean()
     askThreadPool.shutdownNow()
   }
 
   /////////////////////////////////////////////////////////////////////////////
-  private def stop_clean_ref(): Unit = {
+  private def lrc_clean(): Unit = {
     val stopTime = System.currentTimeMillis
     val duration = stopTime - startTime
     RDDHit = totalReference - RDDMiss // yyh: align total reference count
-    if (RDDHit < 0 ) {
-      RDDHit = 0
-    }
+    if (RDDHit < 0 ) RDDHit = 0
     logInfo(s"LRC: log stoptime: $stopTime, duration: $duration ms")
     logInfo(s"LRC: Closing blockMangerMasterEndPoint, RDD hit $RDDHit, RDD miss $RDDMiss")
     logInfo(s"LRC: Disk read count: $diskRead, disk write count: $diskWrite")
@@ -709,7 +699,7 @@ class BlockManagerMasterEndpoint(
     for (bm <- blockManagerInfo.values) {
       val (currentRefMap, refMap) = bm.slaveEndpoint.askSync[(mutable.Map[BlockId, Int],
         mutable.Map[BlockId, Int])](BroadcastJobDAG(jobId, None))
-      // val (currentRefMap, refMap) = bm.broadcastJobDAG(jobId)
+
       logInfo(s"LRC: Updated CurrentRefMap from $bm: $currentRefMap")
       logInfo(s"LRC: Updated RefMap from $bm: $refMap")
     }
@@ -718,7 +708,7 @@ class BlockManagerMasterEndpoint(
   private def broadcastJobDAG(jobId: Int, partitionNumber: Int,
                               refCount: mutable.HashMap[Int, Int]): Unit = {
     logInfo(s"LRC: Start to broadcast the profiled refCount of job $jobId")
-    logInfo(s"$refCount")
+    logInfo(s"LRC: The reference count for each RDD (RDD -> RefCount): $refCount")
     for (bm <- blockManagerInfo.values) {
       val (currentRefMap, refMap) = bm.slaveEndpoint.askSync[(mutable.HashMap[BlockId, Int],
         mutable.HashMap[BlockId, Int])](BroadcastJobDAG(jobId, Some(refCount)))
@@ -731,15 +721,6 @@ class BlockManagerMasterEndpoint(
     partition = partitionNumber
   }
 
-  /**
-   * private def broadcastRefCount(refCount: mutable.HashMap[Int, Int]): Unit = {
-   * for (bm <- blockManagerInfo.values) {
-   * bm.slaveEndpoint.askSync(BroadcastRefCount(refCount))
-   * logInfo(s"zcl: broadcasted refcount to $bm")
-   * }
-   * }
-   */
-
   private def updateCacheHit(blockManagerId: BlockManagerId, list: List[Int],
                              hitBlockList: mutable.MutableList[BlockId]): Boolean = {
     // list (hitCount, missCount, diskRead, diskWrite)
@@ -750,22 +731,22 @@ class BlockManagerMasterEndpoint(
       diskWrite += list(3)
 
     }
-    logDebug(s"LRC: Received Report from $blockManagerId: " +
+    logInfo(s"LRC: Received Report from $blockManagerId: " +
       s"RDD Hit count increased by ${list(0)}. now $RDDHit" +
       s"RDD Miss count increased by ${list(1)}. now $RDDMiss" +
       s"Disk Read count increased by ${list(2)}. now $diskRead" +
       s"Disk Write count increased by ${list(3)}. now $diskWrite"
     )
     this.synchronized { totalHitBlockList ++=  hitBlockList}
-    // printf(s"totalHitBlockList: $totalHitBlockList \n")
-    // calculateEffectiveHit(hitBlockList)
+//    logInfo(s"totalHitBlockList: $totalHitBlockList \n")
+//    calculateEffectiveHit(hitBlockList)
     true
   }
 
   private def getRefProfile(blockManagerId: BlockManagerId, slaveEndPoint: RpcEndpointRef):
   (mutable.HashMap[Int, Int], mutable.HashMap[Int, mutable.HashMap[Int, Int]],
     mutable.HashMap[Int, Int]) = {
-    logDebug(s"yyh: Got the request of refProfile from block manager $blockManagerId, responding")
+    logInfo(s"LRC: Got the request of refProfile from block manager $blockManagerId, responding")
     (refProfile, refProfile_By_Job, peerProfile)
   }
 
@@ -776,8 +757,7 @@ class BlockManagerMasterEndpoint(
 
     if (peerRDDId.isEmpty) {
       logError(s"yyh: The reported block $blockId has no peer!")
-    }
-    else {
+    } else {
       // For conservative all-or-nothing, decrease the ref count of the corresponding block
       // val peerBlockId = new RDDBlockId(peerRDDId.get, index)
       // notifyPeersConservatively(blockId)

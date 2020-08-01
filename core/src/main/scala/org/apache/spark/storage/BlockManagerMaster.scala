@@ -253,7 +253,6 @@ class BlockManagerMaster(
   }
 
   ////////////////////////////////////////////////////////////////////////////
-
   /**
    * yyh, report to the driver the hit and miss count on this blockmanager
    */
@@ -277,9 +276,9 @@ class BlockManagerMaster(
   /**
    * yyh report the current ref map to the driver. For debug
    */
-  // def reportRefMap(blockManagerId: BlockManagerId, refMap: mutable.Map[BlockId, Int]): Unit = {
-  //  driverEndpoint.askWithRetry[Boolean](ReportRefMap(blockManagerId, refMap))
-  // }
+//   def reportRefMap(blockManagerId: BlockManagerId, refMap: mutable.Map[BlockId, Int]): Unit = {
+//    driverEndpoint.ask[Boolean](ReportRefMap(blockManagerId, refMap))
+//   }
 
   /**
    * yyh, for all-or-nothing
@@ -303,7 +302,7 @@ class BlockManagerMaster(
                         refCount: HashMap[Int, Int]): Unit = {
     tell(StartBroadcastRefCount(jobId, numberOfRDDPartitions, refCount))
   }
-
+  ////////////////////////////////////////////////////////////////////////////
 }
 
 private[spark] object BlockManagerMaster {

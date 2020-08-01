@@ -605,8 +605,9 @@ private[spark] class DAGScheduler(
 
 
   private def profileRefCountStageByStage(rdd: RDD[_], jobId: Int): Unit = {
-    logWarning("LRC: profiling" + " jobId " + jobId + " rdd: " + rdd.id
-      + " " + rdd.getStorageLevel.useMemory)
+
+    logWarning(s"LRC: Profiling Final RDD[${rdd.id}] in job[${jobId}] " +
+      s"with memoryLevel[${rdd.getStorageLevel.useMemory}]")
 
     val refCountByJob = new HashMap[Int, Int]
 
@@ -615,8 +616,6 @@ private[spark] class DAGScheduler(
     while (!waitingReStages.isEmpty) {
       profileRefCountOneStage(waitingReStages.dequeue(), jobId, refCountByJob)
     }
-
-    logWarning("LRC: profiling" + " jobId " + jobId + "done" + " rdd: " + rdd.id)
 
     val numberOfRDDPartitions = rdd.getNumPartitions
     blockManagerMaster.broadcastRefCount(jobId, numberOfRDDPartitions, refCountByJob)
@@ -639,7 +638,7 @@ private[spark] class DAGScheduler(
     if (!visitedStageRDDs.contains(rdd.id)) {
       visitedStageRDDs += rdd.id
     } else {
-      logWarning("zcl: visited stage rdd: " + rdd.id + " skip")
+      logWarning("LRC: visited stage rdd: " + rdd.id + " skip")
       return
     }
 
@@ -653,50 +652,52 @@ private[spark] class DAGScheduler(
         }
       }
       for (dep <- rdd.dependencies) {
-        logWarning("zcl: processing dependency between rdd: " + rdd.id + " " + dep.rdd.id)
+        logWarning(s"LRC: processing RDD_${rdd.id} dependent RDD_${dep.rdd.id}")
         dep match {
           case shufDep: ShuffleDependency[_, _, _] =>
             if (!expendedNodes.contains(shufDep.rdd.id)) {
               if (!waitingReStages.contains(shufDep.rdd)) {
                 waitingReStages += shufDep.rdd
-                logWarning("zcl: shuffllede between " + rdd.id +
-                  " and " + shufDep.rdd.id + ", to the queue")
+
+                logWarning(s"LRC: Add The Shuffle Depedency between RDD_${rdd.id} and " +
+                  s"RDD_${shufDep.rdd.id}, to the queue")
               } else {
-                logWarning("zcl: shuffllede between " + rdd.id +
-                  " and " + shufDep.rdd.id + ", duplecated, cancel")
+                logWarning(s"LRC: The Shuffle Depedency between RDD_${rdd.id} and " +
+                  s"RDD_${shufDep.rdd.id}, duplecated, cancel")
               }
             } else {
-              logWarning("zcl: shuffllede between " + rdd.id +
-                " and " + shufDep.rdd.id + " skip")
+              logWarning(s"LRC: The Shuffle Depedency between RDD_${rdd.id} and " +
+                s"RDD_${shufDep.rdd.id}, skip")
             }
           case narrowDep: NarrowDependency[_] =>
             if ((!expendedNodes.contains(narrowDep.rdd.id))
               && (!waitingForVisit.contains(narrowDep.rdd))) {
+              logWarning(s"LRC: The Narrow Dependency between RDD_${rdd.id} and " +
+                s"RDD[${narrowDep.rdd.id}], is added to waitingForVisit")
               waitingForVisit.push(narrowDep.rdd)
             }
             if (narrowDep.rdd.getStorageLevel.useMemory) {
-              //              if ((!newInMemoryRDDs.contains(narrowDep.rdd.id))
-              //                && (!expendedNodes.contains(narrowDep.rdd.id))) {
-              //                newInMemoryRDDs += narrowDep.rdd.id
-              //              }
               if (rddIdToRefCount.contains(narrowDep.rdd.id)) {
-                val temp = rddIdToRefCount(narrowDep.rdd.id) + 1
-                rddIdToRefCount.put(narrowDep.rdd.id, temp)
-                logWarning("zcl: RefCount for " + narrowDep.rdd.id + " is " + temp)
+                val old_ref = rddIdToRefCount(narrowDep.rdd.id)
+                rddIdToRefCount.put(narrowDep.rdd.id, old_ref + 1)
+
+                logWarning(s"LRC: Update Reference count for RDD_${narrowDep.rdd.id} " +
+                  s"from $old_ref to ${old_ref + 1} globally")
               } else {
                 rddIdToRefCount.put(narrowDep.rdd.id, 1)
-                logWarning("zcl: RefCount for " + narrowDep.rdd.id + " is 1")
+                logWarning(s"LRC: Set up Reference count for RDD_${narrowDep.rdd.id} is 1 globally")
               }
               if (refCountById.contains(narrowDep.rdd.id)) {
-                val temp = refCountById(narrowDep.rdd.id) + 1
-                refCountById.put(narrowDep.rdd.id, temp)
-                // logWarning("zcl: RefCount for " + narrowDep.rdd.id + " is " + temp)
+                val old_ref = refCountById(narrowDep.rdd.id)
+                refCountById.put(narrowDep.rdd.id, old_ref + 1)
+
+                logWarning(s"LRC: Update Reference count for RDD_${narrowDep.rdd.id} " +
+                  s"from $old_ref to ${old_ref + 1} locally")
               } else {
                 refCountById.put(narrowDep.rdd.id, 1)
-                // logWarning("zcl: RefCount for " + narrowDep.rdd.id + " is 1")
+                logWarning(s"LRC: Set up Reference count for RDD_${narrowDep.rdd.id} is 1 locally")
               }
             }
-          // expendedNodes.add(rdd)
         }
       }
     }
@@ -717,8 +718,11 @@ private[spark] class DAGScheduler(
   }
 
   private def writeRefCountToFile(jobId: Int, refCountById: HashMap[Int, Int]): Unit = {
-    val des = System.getProperty("user.home") + File.separator +
-      "Documents" + File.separator + "counts" + File.separator + jobId + ".txt";
+    val appName = sc.getConf.getAppName.filter(!" ".contains(_))
+    val path = sc.getConf.get("spark.local.dir") + File.separator + "lrc" + File.separator + appName
+    val dirPath = new File(path)
+    if (!dirPath.exists()) dirPath.mkdir()
+    val des = path + File.separator + jobId + ".txt";
 
     val pw = new PrintWriter(des)
 
@@ -1192,12 +1196,10 @@ private[spark] class DAGScheduler(
       SparkListenerJobStart(job.jobId, jobSubmissionTime, stageInfos, properties))
 
     /**
-     * zcl: profile ref count before construction of stages
+     * Bing: when submit a job, we need to calcuate the reference of each RDD
+     * in this job.
      */
-    // profileRefCount(finalStage, jobId)
-    // profileRefCountSimple(finalStage, jobId)
     profileRefCountStageByStage(finalRDD, jobId)
-
 
     submitStage(finalStage)
   }

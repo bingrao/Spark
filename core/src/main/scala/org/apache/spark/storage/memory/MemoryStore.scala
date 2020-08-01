@@ -16,17 +16,13 @@
  */
 
 package org.apache.spark.storage.memory
-// Bing: add File and FileWrite
 import java.io.{File, FileWriter, OutputStream}
 import java.nio.ByteBuffer
 import java.util.LinkedHashMap
 
-import scala.collection.immutable.ListMap
 import scala.collection.mutable
-// Bing: add MutableList
-import scala.collection.mutable.{ArrayBuffer, MutableList}
+import scala.collection.mutable.{ArrayBuffer}
 import scala.reflect.ClassTag
-import scala.util.control.Breaks.{break, breakable}
 
 import com.google.common.io.ByteStreams
 
@@ -91,10 +87,13 @@ private[spark] class MemoryStore(
 
   // Note: all changes to memory allocations, notably putting blocks, evicting blocks, and
   // acquiring or releasing unroll memory, must be synchronized on `memoryManager`!
-
+  /**
+   * When you set up accessOrder as true, this LinkedHashMap behaves like LRU manner to manage
+   * inserted content.
+   */
   private val entries = new LinkedHashMap[BlockId, MemoryEntry[_]](32, 0.75f, true)
 
-
+  /////////////////////////////////////////////////////////////////////////////////
   /**
    * Bing: define two variables to identify and statistic reference count
    */
@@ -105,7 +104,7 @@ private[spark] class MemoryStore(
   val stickyLog = new FileWriter(new File("stickyLog.txt"))
 
   private val blockManager = blockEvictionHandler.asInstanceOf[BlockManager]
-
+  /////////////////////////////////////////////////////////////////////////////////
 
   // A mapping from taskAttemptId to amount of memory used for unrolling a block (in bytes)
   // All accesses of this map are assumed to have manually synchronized on `memoryManager`
@@ -168,7 +167,6 @@ private[spark] class MemoryStore(
      */
     update_reference_count(blockId)
 
-
     if (memoryManager.acquireStorageMemory(blockId, size, memoryMode)) {
       // We acquired enough memory for the block, so go ahead and put it
       val bytes = _bytes()
@@ -179,10 +177,9 @@ private[spark] class MemoryStore(
       }
 
       if (blockId.isRDD) {
-        currentRefMap.synchronized{
+        currentRefMap.synchronized {
           currentRefMap.put(blockId, refMap(blockId))
-          val ref_count = refMap(blockId)
-          logInfo(s"LRC: put $blockId in current ref map: $ref_count")
+          logInfo(s"LRC: put $blockId in current reference map: ${refMap(blockId)}")
         }
       }
 
@@ -432,9 +429,9 @@ private[spark] class MemoryStore(
        * Bing: Remove this block from current reference map
        */
       val ref_count = if (blockId.isRDD) currentRefMap.synchronized {
-        val ref_count = currentRefMap(blockId)
+        val count = currentRefMap(blockId)
         currentRefMap.remove(blockId)
-        ref_count
+        count
       } else 0
 
       entry match {
@@ -477,6 +474,12 @@ private[spark] class MemoryStore(
    * @param space the size of this block
    * @param memoryMode the type of memory to free (on- or off-heap)
    * @return the amount of memory (in bytes) freed by eviction
+   * Bing: constraits when remove a block
+   * 1. 被淘汰的旧 Block 要与新 Block 的 MemoryMode 相同，即同属于堆外或堆内内存
+   * 2. 新旧 Block 不能属于同一个 RDD，避免循环淘汰
+   * 3. 旧 Block 所属 RDD 不能处于被读状态，避免引发一致性问题
+   * 4. 遍历 LinkedHashMap 中 Block，按照最近最少使用（LRU）的顺序淘汰，直到满足新 Block 所需的空间。
+   *    其中 LRU 是 LinkedHashMap 的特性
    */
   private[spark] def evictBlocksToFreeSpace(
       blockId: Option[BlockId],
@@ -490,55 +493,26 @@ private[spark] class MemoryStore(
       def blockIsEvictable(blockId: BlockId, entry: MemoryEntry[_]): Boolean = {
         entry.memoryMode == memoryMode && (rddToAdd.isEmpty || rddToAdd != getRddId(blockId))
       }
-
-      logInfo(s"yyh: LRC-online: Try to evict space for $blockId")
-      // be cautious to print all the entries, for concurrency issues
-      // This is synchronized to ensure that the set of entries is not changed
-      // (because of getValue or getBytes) while traversing the iterator, as that
-      // can lead to exceptions.
-      var blockToCacheRefCount = Int.MaxValue
-      // yyh: if this is a broadcast block, cache it anyway
-      refMap.synchronized {
-        if (blockId.isDefined && blockId.get.isRDD) {
-          if (refMap.contains(blockId.get)) {
-            blockToCacheRefCount = refMap(blockId.get)
-            logInfo(s"LRC: The ref count of $blockId is $blockToCacheRefCount")
-          } else {
-            blockToCacheRefCount = 1
-            logError(s"LRC: The ref count of $blockId is not in the refMap")
-          }
-        }
-      }
-
       // This is synchronized to ensure that the set of entries is not changed
       // (because of getValue or getBytes) while traversing the iterator, as that
       // can lead to exceptions.
       entries.synchronized {
-        currentRefMap.synchronized {
-          val iterator = entries.entrySet().iterator()
-          val listMap = ListMap(currentRefMap.toSeq.sortBy(_._2): _*)
-
-          breakable {
-            for ((blockId, refCount) <- listMap) {
-              if (refCount < blockToCacheRefCount && freedMemory < space) {
-                val entry = entries.get(blockId)
-                if (blockIsEvictable(blockId, entry)) {
-                  // We don't want to evict blocks which are currently being read,
-                  // so we need to obtain an exclusive write lock on blocks which are
-                  // candidates for eviction. We perform a non-blocking "tryLock" here
-                  // in order to ignore blocks which are locked for reading:
-                  if (blockInfoManager.lockForWriting(blockId, blocking = false).isDefined) {
-                    selectedBlocks += blockId
-                    freedMemory += entry.size
-                  }
-                }
-              } else break
+        val iterator = entries.entrySet().iterator()
+        while (freedMemory < space && iterator.hasNext) {
+          val pair = iterator.next()
+          val blockId = pair.getKey
+          val entry = pair.getValue
+          if (blockIsEvictable(blockId, entry)) {
+            // We don't want to evict blocks which are currently being read, so we need to obtain
+            // an exclusive write lock on blocks which are candidates for eviction. We perform a
+            // non-blocking "tryLock" here in order to ignore blocks which are locked for reading:
+            if (blockInfoManager.lockForWriting(blockId, blocking = false).isDefined) {
+              selectedBlocks += blockId
+              freedMemory += pair.getValue.size
             }
           }
         }
       }
-
-      logInfo(s"LRC: To evict blocks $selectedBlocks with total size $freedMemory")
 
       def dropBlock[T](blockId: BlockId, entry: MemoryEntry[T]): Unit = {
         val data = entry match {
@@ -602,6 +576,135 @@ private[spark] class MemoryStore(
       }
     }
   }
+
+  /////////////////////////////////////////////////////////////////////////////
+  /**
+   * LRC-based evicted base
+   */
+//  private[spark] def evictBlocksToFreeSpace(blockId: Option[BlockId], space: Long,
+//                                            memoryMode: MemoryMode): Long = {
+//    assert(space > 0)
+//    memoryManager.synchronized {
+//      var freedMemory = 0L
+//      val rddToAdd = blockId.flatMap(getRddId)
+//      val selectedBlocks = new ArrayBuffer[BlockId]
+//      def blockIsEvictable(blockId: BlockId, entry: MemoryEntry[_]): Boolean = {
+//        entry.memoryMode == memoryMode && (rddToAdd.isEmpty || rddToAdd != getRddId(blockId))
+//      }
+//
+//      logInfo(s"yyh: LRC-online: Try to evict space for $blockId")
+//      // be cautious to print all the entries, for concurrency issues
+//      // This is synchronized to ensure that the set of entries is not changed
+//      // (because of getValue or getBytes) while traversing the iterator, as that
+//      // can lead to exceptions.
+//      var blockToCacheRefCount = Int.MaxValue
+//      // yyh: if this is a broadcast block, cache it anyway
+//      refMap.synchronized {
+//        if (blockId.isDefined && blockId.get.isRDD) {
+//          if (refMap.contains(blockId.get)) {
+//            blockToCacheRefCount = refMap(blockId.get)
+//            logInfo(s"LRC: The ref count of $blockId is $blockToCacheRefCount")
+//          } else {
+//            blockToCacheRefCount = 1
+//            logError(s"LRC: The ref count of $blockId is not in the refMap")
+//          }
+//        }
+//      }
+//
+//      // This is synchronized to ensure that the set of entries is not changed
+//      // (because of getValue or getBytes) while traversing the iterator, as that
+//      // can lead to exceptions.
+//      entries.synchronized {
+//        currentRefMap.synchronized {
+//          val iterator = entries.entrySet().iterator()
+//          val listMap = ListMap(currentRefMap.toSeq.sortBy(_._2): _*)
+//
+//          breakable {
+//            for ((blockId, refCount) <- listMap) {
+//              if (refCount < blockToCacheRefCount && freedMemory < space) {
+//                val entry = entries.get(blockId)
+//                if (blockIsEvictable(blockId, entry)) {
+//                  // We don't want to evict blocks which are currently being read,
+//                  // so we need to obtain an exclusive write lock on blocks which are
+//                  // candidates for eviction. We perform a non-blocking "tryLock" here
+//                  // in order to ignore blocks which are locked for reading:
+//                  if (blockInfoManager.lockForWriting(blockId, blocking = false).isDefined) {
+//                    selectedBlocks += blockId
+//                    freedMemory += entry.size
+//                  }
+//                }
+//              } else break
+//            }
+//          }
+//        }
+//      }
+//
+//      logInfo(s"LRC: To evict blocks $selectedBlocks with total size $freedMemory")
+//
+//      def dropBlock[T](blockId: BlockId, entry: MemoryEntry[T]): Unit = {
+//        val data = entry match {
+//          case DeserializedMemoryEntry(values, _, _) => Left(values)
+//          case SerializedMemoryEntry(buffer, _, _) => Right(buffer)
+//        }
+//        val newEffectiveStorageLevel =
+//          blockEvictionHandler.dropFromMemory(blockId, () => data)(entry.classTag)
+//        if (newEffectiveStorageLevel.isValid) {
+//          // The block is still present in at least one store, so release the lock
+//          // but don't delete the block info
+//          blockInfoManager.unlock(blockId)
+//        } else {
+//          // The block isn't present in any store, so delete the block info so that the
+//          // block can be stored again
+//          blockInfoManager.removeBlock(blockId)
+//        }
+//      }
+//
+//      if (freedMemory >= space) {
+//        var lastSuccessfulBlock = -1
+//        try {
+//          logInfo(s"${selectedBlocks.size} blocks selected for dropping " +
+//            s"(${Utils.bytesToString(freedMemory)} bytes)")
+//          (0 until selectedBlocks.size).foreach { idx =>
+//            val blockId = selectedBlocks(idx)
+//            val entry = entries.synchronized {
+//              entries.get(blockId)
+//            }
+//            // This should never be null as only one task should be dropping
+//            // blocks and removing entries. However the check is still here for
+//            // future safety.
+//            if (entry != null) {
+//              dropBlock(blockId, entry)
+//              afterDropAction(blockId)
+//            }
+//            lastSuccessfulBlock = idx
+//          }
+//          logInfo(s"After dropping ${selectedBlocks.size} blocks, " +
+//            s"free memory is ${Utils.bytesToString(maxMemory - blocksMemoryUsed)}")
+//          freedMemory
+//        } finally {
+//          // like BlockManager.doPut, we use a finally rather than a catch to avoid having to deal
+//          // with InterruptedException
+//          if (lastSuccessfulBlock != selectedBlocks.size - 1) {
+//            // the blocks we didn't process successfully
+//            // are still locked, so we have to unlock them
+//            (lastSuccessfulBlock + 1 until selectedBlocks.size).foreach { idx =>
+//              val blockId = selectedBlocks(idx)
+//              blockInfoManager.unlock(blockId)
+//            }
+//          }
+//        }
+//      } else {
+//        blockId.foreach { id =>
+//          logInfo(s"Will not store $id")
+//        }
+//        selectedBlocks.foreach { id =>
+//          blockInfoManager.unlock(id)
+//        }
+//        0L
+//      }
+//    }
+//  }
+  /////////////////////////////////////////////////////////////////////////////
 
   // hook for testing, so we can simulate a race
   protected def afterDropAction(blockId: BlockId): Unit = {}
@@ -726,14 +829,10 @@ private[spark] class MemoryStore(
       refMap.synchronized { refMap(blockId) = ref_count}
       logInfo(s"LRC: fetch the ref count of $blockId: $ref_count")
     } else if (blockManager.peerLostBlocks.contains(blockId)) {
-      refMap.synchronized {
-        refMap.put(blockId, 0)
-      }
+      refMap.synchronized { refMap.put(blockId, 0) }
       logInfo(s"LRC: block $blockId is not in the ref profile, and its peer is lost")
     } else {
-      refMap.synchronized {
-        refMap.put(blockId, 1)
-      }
+      refMap.synchronized { refMap.put(blockId, 1) }
       logInfo(s"LRC: block $blockId is not in the ref profile")
     }
   }

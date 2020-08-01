@@ -167,7 +167,6 @@ private[spark] class DiskStore(
         throw e
     }
   }
-
 }
 
 private class DiskBlockData(

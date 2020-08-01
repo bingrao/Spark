@@ -302,6 +302,8 @@ abstract class RDD[T: ClassTag](
   }
 
   /**
+   * Bing: When a stage call runTask in [[org.apache.spark.scheduler.ResultTask]] to compute
+   * intermedate dataset
    * Internal method to this RDD; will read from cache if applicable, or otherwise compute it.
    * This should ''not'' be called by users directly, but is available for implementors of custom
    * subclasses of RDD.
