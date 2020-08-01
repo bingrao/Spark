@@ -2280,7 +2280,12 @@ private[spark] class DAGScheduler(
 
   private def writeRefCountToFile(jobId: Int, refCountById: HashMap[Int, Int]): Unit = {
     val appName = sc.getConf.getAppName.filter(!" ".contains(_))
-    val path = sc.getConf.lrcRootPath
+
+    val path = sc.getConf.get("spark.local.dir") + File.separator + "lrc" +
+      File.separator + appName
+    val dirPath = new File(path)
+    if (!dirPath.exists()) dirPath.mkdir()
+
     val des = path + File.separator + jobId + ".txt";
 
     val pw = new PrintWriter(des)

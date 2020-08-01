@@ -112,8 +112,14 @@ class BlockManagerMasterEndpoint(
    * Reference Profile by application
    */
   private val refProfile = mutable.HashMap[Int, Int]() // yyh
-  val prefixedPath = conf.lrcRootPath + File.pathSeparator +
-    conf.getAppName.filter(!" ".contains(_))
+
+
+  val appName = conf.getAppName.filter(!" ".contains(_))
+  val prefixedPath = conf.get("spark.local.dir") + File.separator + "lrc" +
+    File.separator + appName
+  val dirPath = new File(prefixedPath)
+  if (!dirPath.exists()) dirPath.mkdir()
+
   val appDAG = prefixedPath + ".txt"
   logInfo(s"LRC: Driver Endpoint tries to read profile: path: $appDAG")
   if (Files.exists(Paths.get(appDAG))) {
